@@ -178,70 +178,95 @@ class EllipticFeatureEngineer:
         print(f"Graph size: {self.G.number_of_nodes():,} nodes, {self.G.number_of_edges():,} edges")
         print("="*70 + "\n")
         
-        # Compute expensive features once on a sample if needed
-        if use_sampling and len(nodes) > sample_size:
-            print(f"  Using sampling for expensive computations (sample size: {sample_size})")
-            sample_nodes = np.random.choice(
-                list(set(nodes).intersection(self.G.nodes())), 
-                size=min(sample_size, len(set(nodes).intersection(self.G.nodes()))),
-                replace=False
-            )
-            subgraph = self.G.subgraph(sample_nodes)
-        else:
-            subgraph = self.G
-            sample_nodes = list(set(nodes).intersection(self.G.nodes()))
+        # ALWAYS compute on full graph (do NOT sample)
+        subgraph = self.G
+        sample_nodes = list(set(nodes).intersection(self.G.nodes()))
+        print(f"  Using FULL graph for centrality computation ({len(self.G.nodes()):,} nodes)")
         
-        # Compute PageRank
+        # Compute PageRank on FULL graph (do this once)
         if self.pagerank_cache is None:
-            print("  Computing PageRank...", end=' ', flush=True)
-            self.pagerank_cache = nx.pagerank(subgraph, max_iter=50, tol=1e-4)
-            print("✓")
+            print("  Computing PageRank (full graph, this may take 1-2 minutes)...", end=' ', flush=True)
+            import time
+            start_time = time.time()
+            self.pagerank_cache = nx.pagerank(self.G, max_iter=100, tol=1e-5)
+            elapsed = time.time() - start_time
+            print(f"✓ (completed in {elapsed:.1f}s)")
         
-        # Compute Betweenness Centrality (expensive - use sampling)
+        # Compute Betweenness on FULL graph (use sampling for very large graphs)
         if self.betweenness_cache is None:
-            print("  Computing Betweenness Centrality (sampled)...", end=' ', flush=True)
-            k = min(100, len(sample_nodes))  # Sample for betweenness
-            self.betweenness_cache = nx.betweenness_centrality(subgraph, k=k, normalized=True)
-            print("✓")
+            print("  Computing Betweenness Centrality...", end=' ', flush=True)
+            # For very large graphs, use sampling to avoid hours of computation
+            # But use a larger sample (51000) than before (100) for better accuracy
+            if self.G.number_of_nodes() > 150000:
+                print(f"(sampling 15000 nodes from {self.G.number_of_nodes():,} for speed)...", end=' ', flush=True)
+                sample_nodes_bc = np.random.choice(list(self.G.nodes()), size=min(15000, self.G.number_of_nodes()), replace=False)
+                subgraph_bc = self.G.subgraph(sample_nodes_bc)
+                try:
+                    betweenness_sample = nx.betweenness_centrality(subgraph_bc, normalized=True)
+                    # Extend to all nodes: use sample values where available, 0 otherwise
+                    self.betweenness_cache = {n: betweenness_sample.get(n, 0) for n in self.G.nodes()}
+                    print("✓")
+                except Exception as e:
+                    print("Error, using degree-based proxy...", end=' ', flush=True)
+                    self.betweenness_cache = {n: self.G.degree(n)/self.G.number_of_nodes()
+                                             for n in self.G.nodes()}
+                    print("✓")
+            else:
+                try:
+                    self.betweenness_cache = nx.betweenness_centrality(self.G, normalized=True)
+                    print("✓")
+                except (MemoryError, Exception) as e:
+                    print("Error, using degree-based proxy...", end=' ', flush=True)
+                    self.betweenness_cache = {n: self.G.degree(n)/self.G.number_of_nodes()
+                                             for n in self.G.nodes()}
+                    print("✓")
         
-        # Compute Closeness Centrality (expensive - use batch computation on subgraph)
+        # Compute Closeness Centrality (use sampling for very large graphs)
         if self.closeness_cache is None:
-            print("  Computing Closeness Centrality (batch mode - much faster)...")
-            # Use batch computation on the subgraph (MUCH faster than per-node)
-            print(f"    Processing {len(sample_nodes)} nodes in batch...")
-            try:
-                # Batch compute on subgraph is orders of magnitude faster
-                self.closeness_cache = nx.closeness_centrality(subgraph)
-                print("    ✓ Closeness centrality complete")
-            except Exception as e:
-                print(f"    Warning: Batch closeness failed ({e}), using fallback...")
-                # Fallback: assign zero to all
-                self.closeness_cache = {node: 0 for node in sample_nodes}
-                print("    ✓ Closeness centrality complete (fallback)")
+            if self.G.number_of_nodes() > 50000:
+                print("  Computing Closeness Centrality (sampling for large graph)...")
+                print(f"    Processing sample of 10000 nodes from {len(self.G.nodes()):,}...")
+                sample_nodes_cc = np.random.choice(list(self.G.nodes()), size=min(10000, self.G.number_of_nodes()), replace=False)
+                subgraph_cc = self.G.subgraph(sample_nodes_cc)
+                try:
+                    closeness_sample = nx.closeness_centrality(subgraph_cc)
+                    self.closeness_cache = {n: closeness_sample.get(n, 0) for n in self.G.nodes()}
+                    print("    ✓ Closeness centrality complete")
+                except Exception as e:
+                    print(f"    Warning: Closeness failed ({e}), using fallback...")
+                    self.closeness_cache = {node: 0 for node in self.G.nodes()}
+                    print("    ✓ Closeness centrality complete (fallback)")
+            else:
+                print("  Computing Closeness Centrality (full graph)...")
+                print(f"    Processing {len(self.G.nodes()):,} nodes in batch...")
+                try:
+                    self.closeness_cache = nx.closeness_centrality(self.G)
+                    print("    ✓ Closeness centrality complete")
+                except Exception as e:
+                    print(f"    Warning: Batch closeness failed ({e}), using fallback...")
+                    self.closeness_cache = {node: 0 for node in self.G.nodes()}
+                    print("    ✓ Closeness centrality complete (fallback)")
         
-        # Compute Clustering Coefficient (batch on subgraph for speed)
+        # Compute Clustering Coefficient on FULL graph
         if self.clustering_cache is None:
-            print("  Computing Clustering Coefficients (batch mode)...", end=' ', flush=True)
-            # Compute on subgraph only for speed, then fill in zeros for missing nodes
-            subgraph_clustering = nx.clustering(subgraph.to_undirected())
-            # Fill in zeros for nodes not in subgraph
-            self.clustering_cache = {node: 0 for node in self.G.nodes()}
-            self.clustering_cache.update(subgraph_clustering)
+            print("  Computing Clustering Coefficients (full graph)...", end=' ', flush=True)
+            # Compute on full graph
+            self.clustering_cache = nx.clustering(self.G.to_undirected())
             print("✓")
         
-        # Compute Communities (Louvain)
+        # Compute Communities (Louvain) on FULL graph
         if self.communities_cache is None:
-            print("  Computing Community Structure...", end=' ', flush=True)
+            print("  Computing Community Structure (full graph)...", end=' ', flush=True)
             try:
                 import community as community_louvain
-                undirected_subgraph = subgraph.to_undirected()
-                self.communities_cache = community_louvain.best_partition(undirected_subgraph)
+                undirected_graph = self.G.to_undirected()
+                self.communities_cache = community_louvain.best_partition(undirected_graph)
                 print("✓ (Louvain)")
             except:
                 # Fallback: use connected components
                 print("(Using connected components as fallback)...", end=' ', flush=True)
-                undirected_subgraph = subgraph.to_undirected()
-                components = list(nx.connected_components(undirected_subgraph))
+                undirected_graph = self.G.to_undirected()
+                components = list(nx.connected_components(undirected_graph))
                 self.communities_cache = {}
                 for i, component in enumerate(components):
                     for node in component:
@@ -374,6 +399,178 @@ class EllipticFeatureEngineer:
             'closeness_centrality': 0, 'clustering_coefficient': 0,
             'community_id': -1, 'is_hub': 0, 'is_authority': 0
         }
+    
+    def compute_behavioral_features(self, nodes):
+        """
+        Compute behavioral and pattern-based features for nodes.
+
+        Features include:
+        - Transaction value statistics (avg, variance, skewness)
+        - Address reuse patterns
+        - Anomaly indicators (sudden spikes, unusual patterns)
+        - Temporal activity patterns
+        """
+        print("\n" + "="*70)
+        print("COMPUTING BEHAVIORAL FEATURES")
+        print("="*70)
+
+        behavioral_features = []
+
+        for node in nodes:
+            if node not in self.G:
+                behavioral_features.append(self._empty_behavioral_features(node))
+                continue
+
+            # Get all incoming and outgoing edges
+            predecessors = list(self.G.predecessors(node))
+            successors = list(self.G.successors(node))
+
+            # Simple heuristics (since we don't have edge weights/transaction values)
+            # Using network structure as proxy for transaction patterns
+
+            in_edges = len(predecessors)
+            out_edges = len(successors)
+            total_edges = in_edges + out_edges
+
+            # Transaction concentration (do transactions cluster from few sources?)
+            if len(predecessors) > 1:
+                # Count how many predecessors are themselves highly connected
+                pred_degrees = [self.G.degree(p) for p in predecessors]
+                in_concentration = max(pred_degrees) / (sum(pred_degrees) + 1e-6)
+            else:
+                in_concentration = 0
+
+            if len(successors) > 1:
+                succ_degrees = [self.G.degree(s) for s in successors]
+                out_concentration = max(succ_degrees) / (sum(succ_degrees) + 1e-6)
+            else:
+                out_concentration = 0
+
+            # Network mixing (does node mix with diverse peers or same peers?)
+            all_neighbors = set(predecessors + successors)
+            unique_peer_neighbors = sum(1 for n in all_neighbors
+                                        if self.G.degree(n) > 10)  # Hub neighbors
+            peer_diversity = unique_peer_neighbors / (len(all_neighbors) + 1)
+
+            # Bidirectional connections (suspicious if high)
+            bidirectional = sum(1 for p in predecessors if p in successors)
+            bidirectional_ratio = bidirectional / (total_edges + 1)
+
+            # Forward-only chains (suspicious pattern: A->B->C->D)
+            forward_chain_depth = self._compute_forward_chain_depth(node)
+
+            behavioral_features.append({
+                'txId': node,
+                'in_edge_count': in_edges,
+                'out_edge_count': out_edges,
+                'in_concentration': in_concentration,
+                'out_concentration': out_concentration,
+                'peer_diversity': peer_diversity,
+                'bidirectional_ratio': bidirectional_ratio,
+                'forward_chain_depth': forward_chain_depth,
+                'is_chain_node': int(forward_chain_depth > 3),  # Part of long chain
+            })
+
+        result_df = pd.DataFrame(behavioral_features)
+        print(f"Generated {len(behavioral_features)} behavioral feature vectors")
+        print(f"Features per node: {len(behavioral_features[0])-1}")
+        print("="*70 + "\n")
+
+        return result_df
+
+    def _compute_forward_chain_depth(self, node, max_depth=5):
+        """
+        Compute how deep this node is in a forward-flowing chain.
+        High values indicate potential money laundering chains.
+        """
+        def dfs_depth(current, visited=None, depth=0):
+            if visited is None:
+                visited = set()
+            if depth >= max_depth or current in visited:
+                return depth
+            visited.add(current)
+
+            successors = list(self.G.successors(current))
+            if len(successors) == 0:
+                return depth
+
+            # Follow highest-degree successor (main flow)
+            if successors:
+                next_node = max(successors, key=lambda n: self.G.degree(n))
+                return dfs_depth(next_node, visited, depth + 1)
+            return depth
+
+        return dfs_depth(node)
+
+    def _empty_behavioral_features(self, node):
+        """Return zero behavioral features for nodes not in graph"""
+        return {
+            'txId': node,
+            'in_edge_count': 0,
+            'out_edge_count': 0,
+            'in_concentration': 0,
+            'out_concentration': 0,
+            'peer_diversity': 0,
+            'bidirectional_ratio': 0,
+            'forward_chain_depth': 0,
+            'is_chain_node': 0,
+        }
+    
+    def compute_temporal_features(self, nodes, elliptic_features_df):
+        """
+        Extract temporal features from Elliptic's step column.
+
+        Parameters:
+        -----------
+        nodes : array-like
+            Transaction IDs
+        elliptic_features_df : pd.DataFrame
+            Elliptic features DataFrame with 'step' column
+
+        Returns:
+        --------
+        pd.DataFrame with temporal features
+        """
+        print("\n" + "="*70)
+        print("COMPUTING TEMPORAL FEATURES")
+        print("="*70)
+
+        temporal_features = []
+
+        # Create txId to step mapping for fast lookup
+        step_map = dict(zip(elliptic_features_df['txId'], elliptic_features_df['step']))
+
+        for node in nodes:
+            if node not in step_map:
+                # Node not in elliptic features, use default
+                temporal_features.append({
+                    'txId': node,
+                    'step': 0,
+                    'step_ratio': 0,
+                    'is_early': 0,
+                    'is_late': 0,
+                    'is_middle': 0,
+                })
+                continue
+
+            step = step_map[node]
+
+            # Temporal features
+            temporal_features.append({
+                'txId': node,
+                'step': step,
+                'step_ratio': step / 49.0,  # Normalized position (0-1)
+                'is_early': int(step <= 10),  # First 10 steps (new activity)
+                'is_late': int(step >= 40),   # Last 10 steps (recent)
+                'is_middle': int(10 < step < 40),  # Middle period
+            })
+
+        result_df = pd.DataFrame(temporal_features)
+        print(f"Generated {len(temporal_features)} temporal feature vectors")
+        print(f"Features per node: {len(temporal_features[0])-1}")
+        print("="*70 + "\n")
+
+        return result_df
     
     def get_transaction_features(self, nodes, feature_subset=None):
         """
