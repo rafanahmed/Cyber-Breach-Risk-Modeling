@@ -40,7 +40,6 @@ def _is_notebook():
 
 IS_NOTEBOOK = _is_notebook()
 
-# Legacy/experimental - not used in main pipeline
 # Progress tracking class that works reliably in notebooks
 class NotebookProgress:
     """Progress tracker that works in Jupyter notebooks with joblib.Parallel"""
@@ -194,7 +193,6 @@ class EllipticFeatureEngineer:
             print(f"✓ (completed in {elapsed:.1f}s)")
         
         # Compute Betweenness on FULL graph (use sampling for very large graphs)
-        # NOTE: Betweenness and Closeness use sampling for large graphs, so values are approximate
         if self.betweenness_cache is None:
             print("  Computing Betweenness Centrality...", end=' ', flush=True)
             # For very large graphs, use sampling to avoid hours of computation
@@ -224,7 +222,6 @@ class EllipticFeatureEngineer:
                     print("✓")
         
         # Compute Closeness Centrality (use sampling for very large graphs)
-        # NOTE: Approximate values due to sampling for computational efficiency
         if self.closeness_cache is None:
             if self.G.number_of_nodes() > 50000:
                 print("  Computing Closeness Centrality (sampling for large graph)...")
@@ -456,8 +453,6 @@ class EllipticFeatureEngineer:
             peer_diversity = unique_peer_neighbors / (len(all_neighbors) + 1)
 
             # Bidirectional connections (suspicious if high)
-            # NOTE: Some feature redundancy is intentional for tree-based models (RF, XGBoost)
-            # which can benefit from multiple correlated features
             bidirectional = sum(1 for p in predecessors if p in successors)
             bidirectional_ratio = bidirectional / (total_edges + 1)
 
